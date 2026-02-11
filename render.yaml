@@ -6,7 +6,7 @@ services:
     healthCheckPath: /health
     envVars:
       - key: PORT
-        value: "8080"
+        value: "18789"
       - key: SETUP_PASSWORD
         sync: false
       - key: OPENCLAW_STATE_DIR
