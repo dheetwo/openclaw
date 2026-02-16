@@ -30,7 +30,6 @@ if ! grep -q 'botToken' /data/.openclaw/openclaw.json 2>/dev/null && \
   "channels": {
     "telegram": {
       "enabled": true,
-      "botToken": "${TELEGRAM_OPENCLAW_TOKEN}",
       "accounts": {
         "deepseek": {
           "enabled": true,
