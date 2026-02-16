@@ -11,6 +11,7 @@ if ! grep -q 'botToken' /data/.openclaw/openclaw.json 2>/dev/null && \
   cat > /data/.openclaw/openclaw.json << ENDCFG
 {
   "gateway": {
+    "mode": "local",
     "bind": "lan",
     "port": 18789,
     "auth": {
