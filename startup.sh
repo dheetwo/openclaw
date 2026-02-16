@@ -12,40 +12,24 @@ mkdir -p /data/.openclaw/scripts
 cat > /data/.openclaw/hooks/data-redaction/HOOK.md << 'HOOKMD'
 ---
 name: data-redaction
-description: "Redacts sensitive data (API keys, passwords, tokens) from session files"
+description: "Redacts sensitive data from chat sessions (excludes config files)"
 metadata:
   openclaw:
     emoji: "🔒"
     events: ["gateway:startup", "command:new"]
-    install:
-      - id: workspace
-        kind: workspace
 ---
 # Data Redaction Hook
 
-Automatically detects and redacts sensitive information from session files and memory.
-
-## Detected Patterns
-- API keys (OpenAI, Anthropic, GitHub, AWS, Google, etc.)
-- Tokens (Slack, Discord, Telegram, Bearer)
-- Private keys and certificates
-- Database connection strings
-- Passwords and secrets in common formats
-- Credit card numbers, SSNs
-
-## When It Runs
-- **Gateway startup**: Scans all existing files
-- **On /new command**: Redacts current session before memory save
-- **Every 6 hours**: Cron job scans all files
+Scans session logs and memory files for accidentally shared secrets.
+Config files are excluded to keep bots functional.
 HOOKMD
 
-# Hook handler (also used by cron)
+# Hook handler - only scans .jsonl and .md files
 cat > /data/.openclaw/hooks/data-redaction/handler.js << 'HOOKJS'
 const fs = require("node:fs/promises");
 const path = require("node:path");
 
 const SENSITIVE_PATTERNS = [
-  // API Keys
   { pattern: /sk-[a-zA-Z0-9]{20,}/g, label: "OPENAI_KEY" },
   { pattern: /sk-ant-[a-zA-Z0-9-]{20,}/g, label: "ANTHROPIC_KEY" },
   { pattern: /sk-or-[a-zA-Z0-9-]{20,}/g, label: "OPENROUTER_KEY" },
@@ -58,23 +42,13 @@ const SENSITIVE_PATTERNS = [
   { pattern: /AKIA[0-9A-Z]{16}/g, label: "AWS_ACCESS_KEY" },
   { pattern: /AIza[0-9A-Za-z-_]{35}/g, label: "GOOGLE_API_KEY" },
   { pattern: /ya29\.[0-9A-Za-z_-]+/g, label: "GOOGLE_OAUTH" },
-  // Telegram/Discord tokens
-  { pattern: /[0-9]{8,10}:[a-zA-Z0-9_-]{35}/g, label: "TELEGRAM_TOKEN" },
   { pattern: /[MN][A-Za-z\d]{23,}\.[\w-]{6}\.[\w-]{27}/g, label: "DISCORD_TOKEN" },
-  // Private keys
   { pattern: /-----BEGIN[^-]+PRIVATE KEY-----[\s\S]+?-----END[^-]+PRIVATE KEY-----/g, label: "PRIVATE_KEY" },
-  // Passwords/secrets in common formats
-  { pattern: /password[\s]*[=:]["']?[^\s"']{8,}["']?/gi, label: "PASSWORD" },
-  { pattern: /passwd[\s]*[=:]["']?[^\s"']{8,}["']?/gi, label: "PASSWORD" },
-  { pattern: /secret[\s]*[=:]["']?[^\s"']{8,}["']?/gi, label: "SECRET" },
-  { pattern: /api[_-]?key[\s]*[=:]["']?[^\s"']{16,}["']?/gi, label: "API_KEY" },
   { pattern: /bearer\s+[a-zA-Z0-9._-]{20,}/gi, label: "BEARER_TOKEN" },
-  // Database URIs
-  { pattern: /mongodb(\+srv)?:\/\/[^\s"']+/g, label: "MONGODB_URI" },
-  { pattern: /postgres(ql)?:\/\/[^\s"']+/g, label: "POSTGRES_URI" },
-  { pattern: /mysql:\/\/[^\s"']+/g, label: "MYSQL_URI" },
-  { pattern: /redis:\/\/[^\s"']+/g, label: "REDIS_URI" },
-  // PII
+  { pattern: /mongodb(\+srv)?:\/\/[^:]+:[^@]+@[^\s"']+/g, label: "MONGODB_URI" },
+  { pattern: /postgres(ql)?:\/\/[^:]+:[^@]+@[^\s"']+/g, label: "POSTGRES_URI" },
+  { pattern: /mysql:\/\/[^:]+:[^@]+@[^\s"']+/g, label: "MYSQL_URI" },
+  { pattern: /redis:\/\/[^:]+:[^@]+@[^\s"']+/g, label: "REDIS_URI" },
   { pattern: /\b(?:4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\b/g, label: "CREDIT_CARD" },
   { pattern: /\b\d{3}-\d{2}-\d{4}\b/g, label: "SSN" },
 ];
@@ -116,7 +90,8 @@ async function scanDir(dir) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         total += await scanDir(full);
-      } else if (entry.name.endsWith(".jsonl") || entry.name.endsWith(".md") || entry.name.endsWith(".json")) {
+      } else if (entry.name.endsWith(".jsonl") || entry.name.endsWith(".md")) {
+        // ONLY session logs and memory files - NOT config (.json)
         total += await processFile(full);
       }
     }
@@ -124,18 +99,16 @@ async function scanDir(dir) {
   } catch { return 0; }
 }
 
-// Export for cron script
 module.exports.scanDir = scanDir;
 module.exports.redactText = redactText;
 
-// Hook handler
 module.exports = async function(event) {
   const dataDir = process.env.OPENCLAW_STATE_DIR || "/data/.openclaw";
   
   if (event.type === "gateway" && event.action === "startup") {
     console.log("[redaction] Startup scan...");
     const count = await scanDir(dataDir);
-    if (count > 0) console.log("[redaction] Startup: " + count + " item(s) redacted");
+    console.log("[redaction] Startup complete: " + count + " item(s) redacted");
   }
   
   if (event.type === "command" && event.action === "new") {
@@ -146,24 +119,21 @@ module.exports = async function(event) {
 };
 HOOKJS
 
-# Standalone cron script for periodic redaction
 cat > /data/.openclaw/scripts/redact-cron.js << 'CRONJS'
 #!/usr/bin/env node
 const { scanDir } = require("/data/.openclaw/hooks/data-redaction/handler.js");
-
 async function main() {
   const dataDir = process.env.OPENCLAW_STATE_DIR || "/data/.openclaw";
-  console.log("[redaction-cron] " + new Date().toISOString() + " Running scheduled scan...");
+  console.log("[redaction-cron] " + new Date().toISOString());
   const count = await scanDir(dataDir);
-  console.log("[redaction-cron] Complete: " + count + " item(s) redacted");
+  console.log("[redaction-cron] Done: " + count + " item(s) redacted");
 }
-
 main().catch(console.error);
 CRONJS
 chmod +x /data/.openclaw/scripts/redact-cron.js
 
 # =============================================================================
-# Create OpenClaw Config with Shared Memory + Cron (every 6 hours)
+# OpenClaw Config
 # =============================================================================
 rm -f /data/.openclaw/config.toml /data/.openclaw/openclaw.json 2>/dev/null
 cat > /data/.openclaw/openclaw.json << ENDCFG
@@ -222,7 +192,7 @@ cat > /data/.openclaw/openclaw.json << ENDCFG
         "enabled": true,
         "schedule": "0 */6 * * *",
         "command": "node /data/.openclaw/scripts/redact-cron.js",
-        "description": "Sensitive data redaction sweep every 6 hours"
+        "description": "Redaction sweep every 6 hours"
       }
     }
   },
@@ -247,12 +217,6 @@ cat > /data/.openclaw/openclaw.json << ENDCFG
 }
 ENDCFG
 
-# Create shared directories
-mkdir -p /data/.openclaw/workspace
-mkdir -p /data/.openclaw/memory
-mkdir -p /data/.openclaw/agents/main/sessions
-
-# Run doctor to auto-fix config
+mkdir -p /data/.openclaw/workspace /data/.openclaw/memory /data/.openclaw/agents/main/sessions
 node openclaw.mjs doctor --fix --non-interactive 2>/dev/null || true
-
 exec node openclaw.mjs gateway --allow-unconfigured --bind lan
