@@ -2,13 +2,10 @@
 
 mkdir -p /data/.openclaw
 
-# Check if Telegram is properly configured (botToken under channels.telegram)
-# If not, recreate config with proper structure
-if ! grep -q 'botToken' /data/.openclaw/openclaw.json 2>/dev/null && \
-   ! grep -q 'botToken' /data/.openclaw/config.toml 2>/dev/null; then
-  # Reset config with proper Telegram channel structure
-  rm -f /data/.openclaw/config.toml /data/.openclaw/openclaw.json 2>/dev/null
-  cat > /data/.openclaw/openclaw.json << ENDCFG
+# Always recreate config with known-good structure
+# This ensures gateway.mode is set and Telegram channels are properly configured
+rm -f /data/.openclaw/config.toml /data/.openclaw/openclaw.json 2>/dev/null
+cat > /data/.openclaw/openclaw.json << ENDCFG
 {
   "gateway": {
     "mode": "local",
@@ -43,7 +40,6 @@ if ! grep -q 'botToken' /data/.openclaw/openclaw.json 2>/dev/null && \
   }
 }
 ENDCFG
-fi
 
 # Auto-enable configured channels
 node openclaw.mjs doctor --fix --non-interactive 2>/dev/null || true
