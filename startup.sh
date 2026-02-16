@@ -2,10 +2,11 @@
 
 mkdir -p /data/.openclaw
 
-# Check if Telegram channels are configured; if not, reset config
-if ! grep -q "telegram" /data/.openclaw/openclaw.json 2>/dev/null && \
-   ! grep -q "telegram" /data/.openclaw/config.toml 2>/dev/null; then
-  # No Telegram config found, create fresh config
+# Check if Telegram is properly configured (botToken under channels.telegram)
+# If not, recreate config with proper structure
+if ! grep -q 'botToken' /data/.openclaw/openclaw.json 2>/dev/null && \
+   ! grep -q 'botToken' /data/.openclaw/config.toml 2>/dev/null; then
+  # Reset config with proper Telegram channel structure
   rm -f /data/.openclaw/config.toml /data/.openclaw/openclaw.json 2>/dev/null
   cat > /data/.openclaw/openclaw.json << ENDCFG
 {
