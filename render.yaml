@@ -15,6 +15,10 @@ services:
         value: /data/workspace
       - key: OPENCLAW_GATEWAY_TOKEN
         generateValue: true
+      - key: TELEGRAM_OPENCLAW_TOKEN
+        sync: false
+      - key: TELEGRAM_DEEPCLAW_TOKEN
+        sync: false
     disk:
       name: openclaw-data
       mountPath: /data

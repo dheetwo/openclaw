@@ -4,7 +4,7 @@
 # This preserves channel configurations (Telegram, Gmail, etc.) made through the UI
 if [ ! -f /data/.openclaw/openclaw.json ] && [ ! -f /data/.openclaw/config.toml ]; then
   mkdir -p /data/.openclaw
-  cat > /data/.openclaw/openclaw.json << 'ENDCFG'
+  cat > /data/.openclaw/openclaw.json << ENDCFG
 {
   "gateway": {
     "bind": "lan",
@@ -20,6 +20,18 @@ if [ ! -f /data/.openclaw/openclaw.json ] && [ ! -f /data/.openclaw/config.toml 
   "agents": {
     "defaults": {
       "workspace": "/home/node/.openclaw/workspace"
+    }
+  },
+  "channels": {
+    "default": {
+      "type": "telegram",
+      "token": "${TELEGRAM_OPENCLAW_TOKEN}",
+      "enabled": true
+    },
+    "deepseek": {
+      "type": "telegram",
+      "token": "${TELEGRAM_DEEPCLAW_TOKEN}",
+      "enabled": true
     }
   },
   "meta": {
