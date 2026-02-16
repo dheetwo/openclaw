@@ -2,6 +2,9 @@
 
 mkdir -p /data/.openclaw
 
+# Debug: show env var status
+echo "DEBUG: TELEGRAM_DEEPCLAW_TOKEN length: ${#TELEGRAM_DEEPCLAW_TOKEN}"
+
 # Always recreate config with known-good structure
 # This ensures gateway.mode is set and Telegram channels are properly configured
 rm -f /data/.openclaw/config.toml /data/.openclaw/openclaw.json 2>/dev/null
@@ -40,6 +43,10 @@ cat > /data/.openclaw/openclaw.json << ENDCFG
   }
 }
 ENDCFG
+
+# Debug: show what config was written
+echo "DEBUG: Config content:"
+cat /data/.openclaw/openclaw.json
 
 # Auto-enable configured channels
 node openclaw.mjs doctor --fix --non-interactive 2>/dev/null || true
