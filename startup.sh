@@ -1,9 +1,12 @@
 #!/bin/sh
 
-# Only create default config if no config exists yet
-# This preserves channel configurations (Telegram, Gmail, etc.) made through the UI
-if [ ! -f /data/.openclaw/openclaw.json ] && [ ! -f /data/.openclaw/config.toml ]; then
-  mkdir -p /data/.openclaw
+mkdir -p /data/.openclaw
+
+# Check if Telegram channels are configured; if not, reset config
+if ! grep -q "telegram" /data/.openclaw/openclaw.json 2>/dev/null && \
+   ! grep -q "telegram" /data/.openclaw/config.toml 2>/dev/null; then
+  # No Telegram config found, create fresh config
+  rm -f /data/.openclaw/config.toml /data/.openclaw/openclaw.json 2>/dev/null
   cat > /data/.openclaw/openclaw.json << ENDCFG
 {
   "gateway": {
