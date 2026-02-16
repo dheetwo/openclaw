@@ -26,15 +26,15 @@ if ! grep -q "telegram" /data/.openclaw/openclaw.json 2>/dev/null && \
     }
   },
   "channels": {
-    "default": {
-      "type": "telegram",
-      "token": "${TELEGRAM_OPENCLAW_TOKEN}",
-      "enabled": true
-    },
-    "deepseek": {
-      "type": "telegram",
-      "token": "${TELEGRAM_DEEPCLAW_TOKEN}",
-      "enabled": true
+    "telegram": {
+      "enabled": true,
+      "botToken": "${TELEGRAM_OPENCLAW_TOKEN}",
+      "accounts": {
+        "deepseek": {
+          "enabled": true,
+          "botToken": "${TELEGRAM_DEEPCLAW_TOKEN}"
+        }
+      }
     }
   },
   "meta": {
