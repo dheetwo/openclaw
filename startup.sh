@@ -3,9 +3,10 @@
 mkdir -p /data/.openclaw
 
 # =============================================================================
-# Create Data Redaction Hook
+# Create Data Redaction Hook + Cron Script
 # =============================================================================
 mkdir -p /data/.openclaw/hooks/data-redaction
+mkdir -p /data/.openclaw/scripts
 
 # Hook metadata
 cat > /data/.openclaw/hooks/data-redaction/HOOK.md << 'HOOKMD'
@@ -33,11 +34,12 @@ Automatically detects and redacts sensitive information from session files and m
 - Credit card numbers, SSNs
 
 ## When It Runs
-- **Gateway startup**: Scans all existing `.jsonl` and `.md` files
+- **Gateway startup**: Scans all existing files
 - **On /new command**: Redacts current session before memory save
+- **Every 6 hours**: Cron job scans all files
 HOOKMD
 
-# Hook handler
+# Hook handler (also used by cron)
 cat > /data/.openclaw/hooks/data-redaction/handler.js << 'HOOKJS'
 const fs = require("node:fs/promises");
 const path = require("node:path");
@@ -81,7 +83,6 @@ function redactText(text) {
   let redacted = text;
   let count = 0;
   for (const { pattern, label } of SENSITIVE_PATTERNS) {
-    // Reset regex state
     pattern.lastIndex = 0;
     const matches = redacted.match(pattern);
     if (matches) {
@@ -115,7 +116,7 @@ async function scanDir(dir) {
       const full = path.join(dir, entry.name);
       if (entry.isDirectory()) {
         total += await scanDir(full);
-      } else if (entry.name.endsWith(".jsonl") || entry.name.endsWith(".md")) {
+      } else if (entry.name.endsWith(".jsonl") || entry.name.endsWith(".md") || entry.name.endsWith(".json")) {
         total += await processFile(full);
       }
     }
@@ -123,11 +124,16 @@ async function scanDir(dir) {
   } catch { return 0; }
 }
 
+// Export for cron script
+module.exports.scanDir = scanDir;
+module.exports.redactText = redactText;
+
+// Hook handler
 module.exports = async function(event) {
   const dataDir = process.env.OPENCLAW_STATE_DIR || "/data/.openclaw";
   
   if (event.type === "gateway" && event.action === "startup") {
-    console.log("[redaction] Scanning existing files...");
+    console.log("[redaction] Startup scan...");
     const count = await scanDir(dataDir);
     if (count > 0) console.log("[redaction] Startup: " + count + " item(s) redacted");
   }
@@ -140,8 +146,24 @@ module.exports = async function(event) {
 };
 HOOKJS
 
+# Standalone cron script for periodic redaction
+cat > /data/.openclaw/scripts/redact-cron.js << 'CRONJS'
+#!/usr/bin/env node
+const { scanDir } = require("/data/.openclaw/hooks/data-redaction/handler.js");
+
+async function main() {
+  const dataDir = process.env.OPENCLAW_STATE_DIR || "/data/.openclaw";
+  console.log("[redaction-cron] " + new Date().toISOString() + " Running scheduled scan...");
+  const count = await scanDir(dataDir);
+  console.log("[redaction-cron] Complete: " + count + " item(s) redacted");
+}
+
+main().catch(console.error);
+CRONJS
+chmod +x /data/.openclaw/scripts/redact-cron.js
+
 # =============================================================================
-# Create OpenClaw Config with Shared Memory
+# Create OpenClaw Config with Shared Memory + Cron (every 6 hours)
 # =============================================================================
 rm -f /data/.openclaw/config.toml /data/.openclaw/openclaw.json 2>/dev/null
 cat > /data/.openclaw/openclaw.json << ENDCFG
@@ -192,6 +214,17 @@ cat > /data/.openclaw/openclaw.json << ENDCFG
   "memorySearch": {
     "enabled": true,
     "indexPath": "/data/.openclaw/memory/index"
+  },
+  "cron": {
+    "enabled": true,
+    "jobs": {
+      "redaction-sweep": {
+        "enabled": true,
+        "schedule": "0 */6 * * *",
+        "command": "node /data/.openclaw/scripts/redact-cron.js",
+        "description": "Sensitive data redaction sweep every 6 hours"
+      }
+    }
   },
   "hooks": {
     "internal": {
