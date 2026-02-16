@@ -1,5 +1,10 @@
 #!/bin/sh
-cat > /data/.openclaw/openclaw.json << 'ENDCFG'
+
+# Only create default config if no config exists yet
+# This preserves channel configurations (Telegram, Gmail, etc.) made through the UI
+if [ ! -f /data/.openclaw/openclaw.json ] && [ ! -f /data/.openclaw/config.toml ]; then
+  mkdir -p /data/.openclaw
+  cat > /data/.openclaw/openclaw.json << 'ENDCFG'
 {
   "gateway": {
     "bind": "lan",
@@ -22,5 +27,6 @@ cat > /data/.openclaw/openclaw.json << 'ENDCFG'
   }
 }
 ENDCFG
+fi
 
 exec node openclaw.mjs gateway --allow-unconfigured --bind lan
