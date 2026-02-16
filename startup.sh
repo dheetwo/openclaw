@@ -45,4 +45,7 @@ if ! grep -q 'botToken' /data/.openclaw/openclaw.json 2>/dev/null && \
 ENDCFG
 fi
 
+# Auto-enable configured channels
+node openclaw.mjs doctor --fix --non-interactive 2>/dev/null || true
+
 exec node openclaw.mjs gateway --allow-unconfigured --bind lan
