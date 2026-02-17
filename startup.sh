@@ -190,11 +190,17 @@ CONFIG_PATH="${CONFIG_PATH}" \
 TELEGRAM_OPENCLAW_TOKEN="${TELEGRAM_OPENCLAW_TOKEN:-}" \
 TELEGRAM_DEEPCLAW_TOKEN="${TELEGRAM_DEEPCLAW_TOKEN:-}" \
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}" \
+DEEPSEEK_API_KEY="${DEEPSEEK_API_KEY:-}" \
+ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
 node <<'NODE'
 const fs = require("node:fs");
+const path = require("node:path");
 
 const configPath = process.env.CONFIG_PATH;
 const TELEGRAM_BOT_TOKEN_PATTERN = /^\d+:[A-Za-z0-9_-]{20,}$/;
+const MAIN_AGENT_DIR = "/data/.openclaw/agents/main/agent";
+const MAIN_AGENT_AUTH_STORE = path.join(MAIN_AGENT_DIR, "auth-profiles.json");
+const AUTH_STORE_VERSION = 1;
 
 const normalizeTelegramToken = (raw) => {
   const value = String(raw || "").trim();
@@ -223,6 +229,70 @@ const openclawToken = firstValidTelegramToken([
 const deepclawToken = firstValidTelegramToken([
   ["TELEGRAM_DEEPCLAW_TOKEN", process.env.TELEGRAM_DEEPCLAW_TOKEN],
 ]);
+
+const normalizeApiKey = (raw) =>
+  String(raw || "")
+    .replace(/\r?\n/g, "")
+    .trim();
+
+const sanitizeProviderKey = (raw) => {
+  const value = normalizeApiKey(raw);
+  if (!value) return "";
+  if (value.includes("[REDACTED")) return "";
+  return value;
+};
+
+const loadAuthStore = () => {
+  try {
+    const raw = fs.readFileSync(MAIN_AGENT_AUTH_STORE, "utf8");
+    const parsed = raw.trim() ? JSON.parse(raw) : {};
+    if (!parsed || typeof parsed !== "object") {
+      return { version: AUTH_STORE_VERSION, profiles: {} };
+    }
+    const profiles =
+      parsed.profiles && typeof parsed.profiles === "object" ? { ...parsed.profiles } : {};
+    return {
+      version:
+        typeof parsed.version === "number" && Number.isFinite(parsed.version)
+          ? parsed.version
+          : AUTH_STORE_VERSION,
+      profiles,
+      order:
+        parsed.order && typeof parsed.order === "object" ? { ...parsed.order } : undefined,
+      lastGood:
+        parsed.lastGood && typeof parsed.lastGood === "object" ? { ...parsed.lastGood } : undefined,
+      usageStats:
+        parsed.usageStats && typeof parsed.usageStats === "object"
+          ? { ...parsed.usageStats }
+          : undefined,
+    };
+  } catch {
+    return { version: AUTH_STORE_VERSION, profiles: {} };
+  }
+};
+
+const upsertApiKeyProfile = (store, provider, apiKey) => {
+  const key = sanitizeProviderKey(apiKey);
+  if (!key) return false;
+  const profileId = `${provider}:default`;
+  const current = store.profiles?.[profileId];
+  if (
+    current &&
+    typeof current === "object" &&
+    current.type === "api_key" &&
+    String(current.provider || "") === provider &&
+    String(current.key || "") === key
+  ) {
+    return false;
+  }
+  store.profiles[profileId] = {
+    ...(current && typeof current === "object" ? current : {}),
+    type: "api_key",
+    provider,
+    key,
+  };
+  return true;
+};
 
 const readConfig = () => {
   try {
@@ -399,6 +469,41 @@ upsertAccount("deepseek", resolvedDeepclawToken);
 console.log(
   `[startup] telegram tokens openclaw=${accountHasToken("default") ? "present" : "missing"} deepclaw=${accountHasToken("deepseek") ? "present" : "missing"}`,
 );
+
+const deepseekApiKey =
+  sanitizeProviderKey(process.env.DEEPSEEK_API_KEY) ||
+  sanitizeProviderKey(cfg?.models?.providers?.deepseek?.apiKey);
+const anthropicApiKey =
+  sanitizeProviderKey(process.env.ANTHROPIC_API_KEY) ||
+  sanitizeProviderKey(cfg?.models?.providers?.anthropic?.apiKey);
+
+console.log(
+  `[startup] model key env anthropic=${anthropicApiKey ? "present" : "missing"} deepseek=${deepseekApiKey ? "present" : "missing"}`,
+);
+
+try {
+  fs.mkdirSync(MAIN_AGENT_DIR, { recursive: true });
+  const authStore = loadAuthStore();
+  authStore.version = AUTH_STORE_VERSION;
+  if (!authStore.profiles || typeof authStore.profiles !== "object") {
+    authStore.profiles = {};
+  }
+
+  const changedProviders = [];
+  if (upsertApiKeyProfile(authStore, "anthropic", anthropicApiKey)) {
+    changedProviders.push("anthropic");
+  }
+  if (upsertApiKeyProfile(authStore, "deepseek", deepseekApiKey)) {
+    changedProviders.push("deepseek");
+  }
+
+  if (changedProviders.length > 0) {
+    fs.writeFileSync(MAIN_AGENT_AUTH_STORE, `${JSON.stringify(authStore, null, 2)}\n`, "utf8");
+    console.log(`[startup] synced auth profiles: ${changedProviders.join(", ")}`);
+  }
+} catch (err) {
+  console.log(`[startup] failed to sync model auth profiles: ${String(err)}`);
+}
 
 cfg.channels.telegram.accounts = accounts;
 
