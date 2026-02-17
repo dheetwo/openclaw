@@ -203,6 +203,18 @@ function resolveFallbackCandidates(params: {
     addCandidate({ provider: primary.provider, model: primary.model }, false);
   }
 
+  // Safety net: avoid a single-model runtime path for Anthropic.
+  // In production we have seen transient Anthropic overloads bubble up as a
+  // hard user-facing failure when only one candidate survives resolution.
+  // Ensure DeepSeek is always available as an emergency fallback candidate.
+  if (
+    params.fallbacksOverride === undefined &&
+    provider === "anthropic" &&
+    !candidates.some((candidate) => candidate.provider === "deepseek")
+  ) {
+    addCandidate({ provider: "deepseek", model: "deepseek-chat" }, false);
+  }
+
   return candidates;
 }
 

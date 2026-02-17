@@ -367,6 +367,45 @@ describe("runWithModelFallback", () => {
     expect(calls).toEqual([{ provider: "openai", model: "gpt-4.1-mini" }]);
   });
 
+  it("injects deepseek fallback for anthropic when no fallback is configured", async () => {
+    const cfg = makeCfg({
+      agents: {
+        defaults: {
+          model: {
+            primary: "anthropic/claude-opus-4-6",
+            fallbacks: [],
+          },
+        },
+      },
+    });
+
+    const calls: Array<{ provider: string; model: string }> = [];
+
+    const result = await runWithModelFallback({
+      cfg,
+      provider: "anthropic",
+      model: "claude-opus-4-6",
+      run: async (provider, model) => {
+        calls.push({ provider, model });
+        if (provider === "anthropic") {
+          throw Object.assign(new Error("The AI service is temporarily overloaded"), {
+            status: 503,
+          });
+        }
+        if (provider === "deepseek" && model === "deepseek-chat") {
+          return "ok";
+        }
+        throw new Error(`unexpected candidate: ${provider}/${model}`);
+      },
+    });
+
+    expect(result.result).toBe("ok");
+    expect(calls).toEqual([
+      { provider: "anthropic", model: "claude-opus-4-6" },
+      { provider: "deepseek", model: "deepseek-chat" },
+    ]);
+  });
+
   it("falls back on missing API key errors", async () => {
     const cfg = makeCfg();
     const run = vi
