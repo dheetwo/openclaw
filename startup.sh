@@ -3,14 +3,13 @@ set -eu
 
 STATE_DIR="/data/.openclaw"
 CONFIG_PATH="${STATE_DIR}/openclaw.json"
-AUTH_CLEAN_MARKER="${STATE_DIR}/.auth-cleaned-v1"
+AUTH_CLEAN_MARKER="${STATE_DIR}/.auth-cleaned-v2"
 
 mkdir -p "${STATE_DIR}"
 
 # One-time cleanup of known-bad auth artifacts from older builds.
 if [ ! -f "${AUTH_CLEAN_MARKER}" ]; then
-  echo "[startup] clearing legacy auth artifacts (one-time)"
-  rm -f "${STATE_DIR}"/agents/*/agent/auth-profiles.json 2>/dev/null || true
+  echo "[startup] clearing legacy auth artifacts (one-time, non-destructive)"
   rm -f "${STATE_DIR}/auth-profiles.json" 2>/dev/null || true
   rm -f "${STATE_DIR}/identity/device.json" 2>/dev/null || true
   touch "${AUTH_CLEAN_MARKER}"
@@ -195,12 +194,17 @@ ANTHROPIC_API_KEY="${ANTHROPIC_API_KEY:-}" \
 node <<'NODE'
 const fs = require("node:fs");
 const path = require("node:path");
+const crypto = require("node:crypto");
 
 const configPath = process.env.CONFIG_PATH;
 const TELEGRAM_BOT_TOKEN_PATTERN = /^\d+:[A-Za-z0-9_-]{20,}$/;
 const MAIN_AGENT_DIR = "/data/.openclaw/agents/main/agent";
 const MAIN_AGENT_AUTH_STORE = path.join(MAIN_AGENT_DIR, "auth-profiles.json");
 const AUTH_STORE_VERSION = 1;
+const TELEGRAM_IDENTITY_PATH = "/data/.openclaw/telegram-identities.json";
+const TELEGRAM_VERIFY_TIMEOUT_MS = 7000;
+const TELEGRAM_VERIFY_ENABLED = process.env.OPENCLAW_VERIFY_TELEGRAM_TOKENS !== "0";
+const TELEGRAM_ALLOW_ID_ROTATION = process.env.OPENCLAW_ALLOW_TELEGRAM_ID_ROTATION === "1";
 
 const normalizeTelegramToken = (raw) => {
   const value = String(raw || "").trim();
@@ -309,26 +313,62 @@ if (!cfg || typeof cfg !== "object") {
   process.exit(0);
 }
 
-const readBackupToken = (accountId) => {
-  const backupPath = `${configPath}.bak`;
+const tokenFingerprint = (raw) => {
+  const token = normalizeTelegramToken(raw);
+  if (!token) return "missing";
+  return crypto.createHash("sha256").update(token).digest("hex").slice(0, 12);
+};
+
+const loadTelegramIdentityCache = () => {
   try {
-    const raw = fs.readFileSync(backupPath, "utf8");
-    const backup = raw.trim() ? JSON.parse(raw) : {};
-    const telegram = backup?.channels?.telegram ?? {};
-    const accountToken = normalizeTelegramToken(telegram?.accounts?.[accountId]?.botToken);
-    if (accountToken) {
-      return accountToken;
-    }
-    if (accountId === "default") {
-      const legacy = normalizeTelegramToken(telegram?.botToken);
-      if (legacy) {
-        return legacy;
-      }
-    }
+    const raw = fs.readFileSync(TELEGRAM_IDENTITY_PATH, "utf8");
+    const parsed = raw.trim() ? JSON.parse(raw) : {};
+    const accounts =
+      parsed.accounts && typeof parsed.accounts === "object" ? { ...parsed.accounts } : {};
+    return { version: 1, accounts };
   } catch {
-    // ignore missing/invalid backup
+    return { version: 1, accounts: {} };
   }
-  return "";
+};
+
+const saveTelegramIdentityCache = (cache) => {
+  try {
+    const payload = {
+      version: 1,
+      accounts: cache && typeof cache.accounts === "object" ? cache.accounts : {},
+      updatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(TELEGRAM_IDENTITY_PATH, `${JSON.stringify(payload, null, 2)}\n`, "utf8");
+  } catch (err) {
+    console.log(`[startup] failed to write telegram identity cache: ${String(err)}`);
+  }
+};
+
+const verifyTelegramToken = async (token, label) => {
+  const normalized = normalizeTelegramToken(token);
+  if (!normalized) {
+    return null;
+  }
+  const url = `https://api.telegram.org/bot${normalized}/getMe`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), TELEGRAM_VERIFY_TIMEOUT_MS);
+  try {
+    const response = await fetch(url, { signal: controller.signal });
+    const payload = await response.json().catch(() => ({}));
+    if (response.ok && payload?.ok && payload?.result?.id) {
+      return {
+        ok: true,
+        id: Number(payload.result.id),
+        username: String(payload.result.username || "").trim().toLowerCase(),
+      };
+    }
+    const description = String(payload?.description || response.statusText || "unknown error").trim();
+    return { ok: false, error: `HTTP ${response.status}: ${description}` };
+  } catch (err) {
+    return { ok: false, error: String(err) };
+  } finally {
+    clearTimeout(timeout);
+  }
 };
 
 cfg.gateway = cfg.gateway && typeof cfg.gateway === "object" ? cfg.gateway : {};
@@ -479,95 +519,254 @@ const upsertAccount = (accountId, token) => {
   };
 };
 
-const resolvedOpenclawToken =
-  openclawToken || (accountHasToken("default") ? "" : readBackupToken("default"));
-const resolvedDeepclawToken =
-  deepclawToken || (accountHasToken("deepseek") ? "" : readBackupToken("deepseek"));
+const existingDefaultToken = normalizeTelegramToken(accounts?.default?.botToken);
+const existingDeepseekToken = normalizeTelegramToken(accounts?.deepseek?.botToken);
 
-upsertAccount("default", resolvedOpenclawToken);
-upsertAccount("deepseek", resolvedDeepclawToken);
+let resolvedOpenclawToken = openclawToken || existingDefaultToken;
+let resolvedDeepclawToken = deepclawToken || existingDeepseekToken;
 
-console.log(
-  `[startup] telegram tokens openclaw=${accountHasToken("default") ? "present" : "missing"} deepclaw=${accountHasToken("deepseek") ? "present" : "missing"}`,
-);
+const resolvedFromEnv = (resolved, envToken) => Boolean(envToken && resolved === envToken);
 
-const deepseekApiKey =
-  sanitizeProviderKey(process.env.DEEPSEEK_API_KEY) ||
-  sanitizeProviderKey(cfg?.models?.providers?.deepseek?.apiKey);
-const anthropicApiKey =
-  sanitizeProviderKey(process.env.ANTHROPIC_API_KEY) ||
-  sanitizeProviderKey(cfg?.models?.providers?.anthropic?.apiKey);
-
-console.log(
-  `[startup] model key env anthropic=${anthropicApiKey ? "present" : "missing"} deepseek=${deepseekApiKey ? "present" : "missing"}`,
-);
-
-try {
-  fs.mkdirSync(MAIN_AGENT_DIR, { recursive: true });
-  const authStore = loadAuthStore();
-  authStore.version = AUTH_STORE_VERSION;
-  if (!authStore.profiles || typeof authStore.profiles !== "object") {
-    authStore.profiles = {};
+const applyTelegramTokenSafeguards = async () => {
+  if (resolvedOpenclawToken && resolvedDeepclawToken && resolvedOpenclawToken === resolvedDeepclawToken) {
+    if (existingDeepseekToken && existingDeepseekToken !== resolvedOpenclawToken) {
+      console.log(
+        "[startup] openclaw/deepclaw tokens are identical; preserving existing deepclaw token to prevent account collision",
+      );
+      resolvedDeepclawToken = existingDeepseekToken;
+    } else {
+      console.log(
+        "[startup] openclaw/deepclaw tokens are identical and no distinct deepclaw token exists; deepclaw token ignored",
+      );
+      resolvedDeepclawToken = "";
+    }
   }
 
-  const changedProviders = [];
-  if (upsertApiKeyProfile(authStore, "anthropic", anthropicApiKey)) {
-    changedProviders.push("anthropic");
-  }
-  if (upsertApiKeyProfile(authStore, "deepseek", deepseekApiKey)) {
-    changedProviders.push("deepseek");
+  if (!TELEGRAM_VERIFY_ENABLED) {
+    console.log("[startup] telegram token verification disabled (OPENCLAW_VERIFY_TELEGRAM_TOKENS=0)");
+    return;
   }
 
-  if (changedProviders.length > 0) {
-    fs.writeFileSync(MAIN_AGENT_AUTH_STORE, `${JSON.stringify(authStore, null, 2)}\n`, "utf8");
-    console.log(`[startup] synced auth profiles: ${changedProviders.join(", ")}`);
+  const identityCache = loadTelegramIdentityCache();
+  const verifyMemo = new Map();
+  const verifyWithMemo = async (token, label) => {
+    const normalized = normalizeTelegramToken(token);
+    if (!normalized) return null;
+    if (verifyMemo.has(normalized)) {
+      return verifyMemo.get(normalized);
+    }
+    const verified = await verifyTelegramToken(normalized, label);
+    if (!verified || !verified.ok) {
+      console.log(
+        `[startup] telegram token verification failed for ${label} fp=${tokenFingerprint(normalized)}: ${verified?.error || "unknown"}`,
+      );
+      verifyMemo.set(normalized, null);
+      return null;
+    }
+    verifyMemo.set(normalized, verified);
+    return verified;
+  };
+
+  let defaultIdentity = await verifyWithMemo(resolvedOpenclawToken, "default");
+  let deepseekIdentity = await verifyWithMemo(resolvedDeepclawToken, "deepseek");
+
+  if (
+    !defaultIdentity &&
+    resolvedFromEnv(resolvedOpenclawToken, openclawToken) &&
+    existingDefaultToken &&
+    existingDefaultToken !== resolvedOpenclawToken
+  ) {
+    const fallbackIdentity = await verifyWithMemo(existingDefaultToken, "default(existing)");
+    if (fallbackIdentity) {
+      console.log("[startup] reverted default telegram token to existing verified token");
+      resolvedOpenclawToken = existingDefaultToken;
+      defaultIdentity = fallbackIdentity;
+    }
   }
-} catch (err) {
-  console.log(`[startup] failed to sync model auth profiles: ${String(err)}`);
-}
-
-cfg.channels.telegram.accounts = accounts;
-
-cfg.memory = cfg.memory && typeof cfg.memory === "object" ? cfg.memory : {};
-cfg.cron = cfg.cron && typeof cfg.cron === "object" ? cfg.cron : {};
-if (typeof cfg.cron.enabled !== "boolean") cfg.cron.enabled = true;
-
-cfg.hooks = cfg.hooks && typeof cfg.hooks === "object" ? cfg.hooks : {};
-cfg.hooks.internal =
-  cfg.hooks.internal && typeof cfg.hooks.internal === "object" ? cfg.hooks.internal : {};
-if (typeof cfg.hooks.internal.enabled !== "boolean") cfg.hooks.internal.enabled = true;
-cfg.hooks.internal.entries =
-  cfg.hooks.internal.entries && typeof cfg.hooks.internal.entries === "object"
-    ? cfg.hooks.internal.entries
-    : {};
-if (!cfg.hooks.internal.entries["session-memory"]) {
-  cfg.hooks.internal.entries["session-memory"] = { enabled: true };
-}
-if (!cfg.hooks.internal.entries["data-redaction"]) {
-  cfg.hooks.internal.entries["data-redaction"] = { enabled: true };
-}
-
-cfg.plugins = cfg.plugins && typeof cfg.plugins === "object" ? cfg.plugins : {};
-cfg.plugins.allow = Array.isArray(cfg.plugins.allow) ? cfg.plugins.allow : [];
-for (const pluginId of ["telegram", "memory-core"]) {
-  if (!cfg.plugins.allow.includes(pluginId)) {
-    cfg.plugins.allow.push(pluginId);
+  if (
+    !deepseekIdentity &&
+    resolvedFromEnv(resolvedDeepclawToken, deepclawToken) &&
+    existingDeepseekToken &&
+    existingDeepseekToken !== resolvedDeepclawToken
+  ) {
+    const fallbackIdentity = await verifyWithMemo(existingDeepseekToken, "deepseek(existing)");
+    if (fallbackIdentity) {
+      console.log("[startup] reverted deepclaw telegram token to existing verified token");
+      resolvedDeepclawToken = existingDeepseekToken;
+      deepseekIdentity = fallbackIdentity;
+    }
   }
-}
-cfg.plugins.entries =
-  cfg.plugins.entries && typeof cfg.plugins.entries === "object" ? cfg.plugins.entries : {};
-for (const pluginId of ["telegram", "memory-core"]) {
-  cfg.plugins.entries[pluginId] =
-    cfg.plugins.entries[pluginId] && typeof cfg.plugins.entries[pluginId] === "object"
-      ? cfg.plugins.entries[pluginId]
+
+  if (!TELEGRAM_ALLOW_ID_ROTATION) {
+    const expectedDefaultId = Number(identityCache.accounts?.default?.id || 0);
+    if (expectedDefaultId && defaultIdentity && defaultIdentity.id !== expectedDefaultId) {
+      console.log(
+        `[startup] default telegram bot identity changed (${expectedDefaultId} -> ${defaultIdentity.id}); restoring previous mapping`,
+      );
+      if (existingDefaultToken && existingDefaultToken !== resolvedOpenclawToken) {
+        const previousIdentity = await verifyWithMemo(existingDefaultToken, "default(previous)");
+        if (previousIdentity && previousIdentity.id === expectedDefaultId) {
+          resolvedOpenclawToken = existingDefaultToken;
+          defaultIdentity = previousIdentity;
+        } else {
+          resolvedOpenclawToken = "";
+          defaultIdentity = null;
+        }
+      } else {
+        resolvedOpenclawToken = "";
+        defaultIdentity = null;
+      }
+    }
+
+    const expectedDeepseekId = Number(identityCache.accounts?.deepseek?.id || 0);
+    if (expectedDeepseekId && deepseekIdentity && deepseekIdentity.id !== expectedDeepseekId) {
+      console.log(
+        `[startup] deepclaw telegram bot identity changed (${expectedDeepseekId} -> ${deepseekIdentity.id}); restoring previous mapping`,
+      );
+      if (existingDeepseekToken && existingDeepseekToken !== resolvedDeepclawToken) {
+        const previousIdentity = await verifyWithMemo(existingDeepseekToken, "deepseek(previous)");
+        if (previousIdentity && previousIdentity.id === expectedDeepseekId) {
+          resolvedDeepclawToken = existingDeepseekToken;
+          deepseekIdentity = previousIdentity;
+        } else {
+          resolvedDeepclawToken = "";
+          deepseekIdentity = null;
+        }
+      } else {
+        resolvedDeepclawToken = "";
+        deepseekIdentity = null;
+      }
+    }
+  }
+
+  if (defaultIdentity && deepseekIdentity && defaultIdentity.id === deepseekIdentity.id) {
+    console.log(
+      `[startup] default/deepclaw resolve to the same telegram bot (@${defaultIdentity.username || "unknown"}); dropping deepclaw token`,
+    );
+    if (existingDeepseekToken && existingDeepseekToken !== resolvedOpenclawToken) {
+      const distinctIdentity = await verifyWithMemo(existingDeepseekToken, "deepseek(distinct)");
+      if (distinctIdentity && distinctIdentity.id !== defaultIdentity.id) {
+        resolvedDeepclawToken = existingDeepseekToken;
+        deepseekIdentity = distinctIdentity;
+      } else {
+        resolvedDeepclawToken = "";
+        deepseekIdentity = null;
+      }
+    } else {
+      resolvedDeepclawToken = "";
+      deepseekIdentity = null;
+    }
+  }
+
+  const nextIdentityCache = { version: 1, accounts: {} };
+  if (defaultIdentity) {
+    nextIdentityCache.accounts.default = {
+      id: defaultIdentity.id,
+      username: defaultIdentity.username || "",
+    };
+  }
+  if (deepseekIdentity) {
+    nextIdentityCache.accounts.deepseek = {
+      id: deepseekIdentity.id,
+      username: deepseekIdentity.username || "",
+    };
+  }
+  saveTelegramIdentityCache(nextIdentityCache);
+};
+
+const bootstrap = async () => {
+  await applyTelegramTokenSafeguards();
+
+  upsertAccount("default", resolvedOpenclawToken);
+  upsertAccount("deepseek", resolvedDeepclawToken);
+
+  console.log(
+    `[startup] telegram tokens openclaw=${accountHasToken("default") ? "present" : "missing"} deepclaw=${accountHasToken("deepseek") ? "present" : "missing"}`,
+  );
+
+  const deepseekApiKey =
+    sanitizeProviderKey(process.env.DEEPSEEK_API_KEY) ||
+    sanitizeProviderKey(cfg?.models?.providers?.deepseek?.apiKey);
+  const anthropicApiKey =
+    sanitizeProviderKey(process.env.ANTHROPIC_API_KEY) ||
+    sanitizeProviderKey(cfg?.models?.providers?.anthropic?.apiKey);
+
+  console.log(
+    `[startup] model key env anthropic=${anthropicApiKey ? "present" : "missing"} deepseek=${deepseekApiKey ? "present" : "missing"}`,
+  );
+
+  try {
+    fs.mkdirSync(MAIN_AGENT_DIR, { recursive: true });
+    const authStore = loadAuthStore();
+    authStore.version = AUTH_STORE_VERSION;
+    if (!authStore.profiles || typeof authStore.profiles !== "object") {
+      authStore.profiles = {};
+    }
+
+    const changedProviders = [];
+    if (upsertApiKeyProfile(authStore, "anthropic", anthropicApiKey)) {
+      changedProviders.push("anthropic");
+    }
+    if (upsertApiKeyProfile(authStore, "deepseek", deepseekApiKey)) {
+      changedProviders.push("deepseek");
+    }
+
+    if (changedProviders.length > 0) {
+      fs.writeFileSync(MAIN_AGENT_AUTH_STORE, `${JSON.stringify(authStore, null, 2)}\n`, "utf8");
+      console.log(`[startup] synced auth profiles: ${changedProviders.join(", ")}`);
+    }
+  } catch (err) {
+    console.log(`[startup] failed to sync model auth profiles: ${String(err)}`);
+  }
+
+  cfg.channels.telegram.accounts = accounts;
+
+  cfg.memory = cfg.memory && typeof cfg.memory === "object" ? cfg.memory : {};
+  cfg.cron = cfg.cron && typeof cfg.cron === "object" ? cfg.cron : {};
+  if (typeof cfg.cron.enabled !== "boolean") cfg.cron.enabled = true;
+
+  cfg.hooks = cfg.hooks && typeof cfg.hooks === "object" ? cfg.hooks : {};
+  cfg.hooks.internal =
+    cfg.hooks.internal && typeof cfg.hooks.internal === "object" ? cfg.hooks.internal : {};
+  if (typeof cfg.hooks.internal.enabled !== "boolean") cfg.hooks.internal.enabled = true;
+  cfg.hooks.internal.entries =
+    cfg.hooks.internal.entries && typeof cfg.hooks.internal.entries === "object"
+      ? cfg.hooks.internal.entries
       : {};
-  cfg.plugins.entries[pluginId].enabled = true;
-}
+  if (!cfg.hooks.internal.entries["session-memory"]) {
+    cfg.hooks.internal.entries["session-memory"] = { enabled: true };
+  }
+  if (!cfg.hooks.internal.entries["data-redaction"]) {
+    cfg.hooks.internal.entries["data-redaction"] = { enabled: true };
+  }
 
-cfg.meta = cfg.meta && typeof cfg.meta === "object" ? cfg.meta : {};
-cfg.meta.lastTouchedVersion = "2026.2.10";
+  cfg.plugins = cfg.plugins && typeof cfg.plugins === "object" ? cfg.plugins : {};
+  cfg.plugins.allow = Array.isArray(cfg.plugins.allow) ? cfg.plugins.allow : [];
+  for (const pluginId of ["telegram", "memory-core"]) {
+    if (!cfg.plugins.allow.includes(pluginId)) {
+      cfg.plugins.allow.push(pluginId);
+    }
+  }
+  cfg.plugins.entries =
+    cfg.plugins.entries && typeof cfg.plugins.entries === "object" ? cfg.plugins.entries : {};
+  for (const pluginId of ["telegram", "memory-core"]) {
+    cfg.plugins.entries[pluginId] =
+      cfg.plugins.entries[pluginId] && typeof cfg.plugins.entries[pluginId] === "object"
+        ? cfg.plugins.entries[pluginId]
+        : {};
+    cfg.plugins.entries[pluginId].enabled = true;
+  }
 
-fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
+  cfg.meta = cfg.meta && typeof cfg.meta === "object" ? cfg.meta : {};
+  cfg.meta.lastTouchedVersion = "2026.2.10";
+
+  fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
+};
+
+bootstrap().catch((err) => {
+  console.log(`[startup] bootstrap failed: ${String(err)}`);
+  process.exit(1);
+});
 NODE
 
 mkdir -p "${STATE_DIR}/workspace" "${STATE_DIR}/memory" "${STATE_DIR}/agents/main/sessions"
