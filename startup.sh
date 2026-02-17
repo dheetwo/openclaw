@@ -189,12 +189,30 @@ fi
 CONFIG_PATH="${CONFIG_PATH}" \
 TELEGRAM_OPENCLAW_TOKEN="${TELEGRAM_OPENCLAW_TOKEN:-}" \
 TELEGRAM_DEEPCLAW_TOKEN="${TELEGRAM_DEEPCLAW_TOKEN:-}" \
+OPENCLAW_TOKEN="${OPENCLAW_TOKEN:-}" \
+DEEPCLAW_TOKEN="${DEEPCLAW_TOKEN:-}" \
+TELEGRAM_TOKEN="${TELEGRAM_TOKEN:-}" \
 node <<'NODE'
 const fs = require("node:fs");
 
 const configPath = process.env.CONFIG_PATH;
-const openclawToken = String(process.env.TELEGRAM_OPENCLAW_TOKEN || "").trim();
-const deepclawToken = String(process.env.TELEGRAM_DEEPCLAW_TOKEN || "").trim();
+const firstNonEmpty = (values) => {
+  for (const raw of values) {
+    const value = String(raw || "").trim();
+    if (value) return value;
+  }
+  return "";
+};
+
+const openclawToken = firstNonEmpty([
+  process.env.TELEGRAM_OPENCLAW_TOKEN,
+  process.env.OPENCLAW_TOKEN,
+  process.env.TELEGRAM_TOKEN,
+]);
+const deepclawToken = firstNonEmpty([
+  process.env.TELEGRAM_DEEPCLAW_TOKEN,
+  process.env.DEEPCLAW_TOKEN,
+]);
 
 const readConfig = () => {
   try {
@@ -284,6 +302,11 @@ const accounts =
     ? cfg.channels.telegram.accounts
     : {};
 
+const accountHasToken = (accountId) => {
+  const token = accounts?.[accountId]?.botToken;
+  return typeof token === "string" && token.trim().length > 0;
+};
+
 for (const accountId of Object.keys(accounts)) {
   const entry = accounts[accountId];
   if (!entry || typeof entry !== "object") continue;
@@ -293,8 +316,9 @@ for (const accountId of Object.keys(accounts)) {
 
 const legacyBotToken =
   typeof cfg.channels.telegram.botToken === "string" ? cfg.channels.telegram.botToken.trim() : "";
-if (!accounts.default && legacyBotToken) {
-  accounts.default = { enabled: true, botToken: legacyBotToken };
+if (legacyBotToken && !accountHasToken("default")) {
+  const current = accounts.default && typeof accounts.default === "object" ? accounts.default : {};
+  accounts.default = { ...current, enabled: true, botToken: legacyBotToken };
 }
 
 const upsertAccount = (accountId, token) => {
@@ -310,9 +334,9 @@ const upsertAccount = (accountId, token) => {
 };
 
 const resolvedOpenclawToken =
-  openclawToken || (accounts.default ? "" : readBackupToken("default"));
+  openclawToken || (accountHasToken("default") ? "" : readBackupToken("default"));
 const resolvedDeepclawToken =
-  deepclawToken || (accounts.deepseek ? "" : readBackupToken("deepseek"));
+  deepclawToken || (accountHasToken("deepseek") ? "" : readBackupToken("deepseek"));
 
 console.log(
   `[startup] telegram tokens openclaw=${resolvedOpenclawToken ? "present" : "missing"} deepclaw=${resolvedDeepclawToken ? "present" : "missing"}`,
