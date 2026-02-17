@@ -405,7 +405,28 @@ if (!Array.isArray(cfg.agents.list) || cfg.agents.list.length === 0) {
 }
 
 cfg.session = cfg.session && typeof cfg.session === "object" ? cfg.session : {};
-if (!cfg.session.dmScope) cfg.session.dmScope = "main";
+const allowedDmScopes = new Set([
+  "main",
+  "per-peer",
+  "per-channel-peer",
+  "per-account-channel-peer",
+]);
+const legacyDmScopeMap = {
+  global: "main",
+  "per-sender": "per-peer",
+  "per-channel-sender": "per-channel-peer",
+  "per-account-channel-sender": "per-account-channel-peer",
+};
+const rawDmScope =
+  typeof cfg.session.dmScope === "string" ? cfg.session.dmScope.trim().toLowerCase() : "";
+const normalizedDmScope = allowedDmScopes.has(rawDmScope)
+  ? rawDmScope
+  : legacyDmScopeMap[rawDmScope] || "main";
+if (cfg.session.dmScope !== normalizedDmScope) {
+  const before = cfg.session.dmScope === undefined ? "missing" : JSON.stringify(cfg.session.dmScope);
+  console.log(`[startup] normalized session.dmScope: ${before} -> ${normalizedDmScope}`);
+}
+cfg.session.dmScope = normalizedDmScope;
 
 cfg.channels = cfg.channels && typeof cfg.channels === "object" ? cfg.channels : {};
 cfg.channels.telegram =
