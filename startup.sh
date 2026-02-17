@@ -190,30 +190,38 @@ CONFIG_PATH="${CONFIG_PATH}" \
 TELEGRAM_OPENCLAW_TOKEN="${TELEGRAM_OPENCLAW_TOKEN:-}" \
 TELEGRAM_DEEPCLAW_TOKEN="${TELEGRAM_DEEPCLAW_TOKEN:-}" \
 TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN:-}" \
-OPENCLAW_TOKEN="${OPENCLAW_TOKEN:-}" \
-DEEPCLAW_TOKEN="${DEEPCLAW_TOKEN:-}" \
-TELEGRAM_TOKEN="${TELEGRAM_TOKEN:-}" \
 node <<'NODE'
 const fs = require("node:fs");
 
 const configPath = process.env.CONFIG_PATH;
-const firstNonEmpty = (values) => {
-  for (const raw of values) {
-    const value = String(raw || "").trim();
-    if (value) return value;
+const TELEGRAM_BOT_TOKEN_PATTERN = /^\d+:[A-Za-z0-9_-]{20,}$/;
+
+const normalizeTelegramToken = (raw) => {
+  const value = String(raw || "").trim();
+  if (!value) return "";
+  if (!TELEGRAM_BOT_TOKEN_PATTERN.test(value)) {
+    return "";
+  }
+  return value;
+};
+
+const firstValidTelegramToken = (entries) => {
+  for (const [source, raw] of entries) {
+    const normalized = normalizeTelegramToken(raw);
+    if (normalized) return normalized;
+    if (String(raw || "").trim()) {
+      console.log(`[startup] ignoring ${source}: invalid telegram bot token format`);
+    }
   }
   return "";
 };
 
-const openclawToken = firstNonEmpty([
-  process.env.TELEGRAM_OPENCLAW_TOKEN,
-  process.env.TELEGRAM_BOT_TOKEN,
-  process.env.OPENCLAW_TOKEN,
-  process.env.TELEGRAM_TOKEN,
+const openclawToken = firstValidTelegramToken([
+  ["TELEGRAM_OPENCLAW_TOKEN", process.env.TELEGRAM_OPENCLAW_TOKEN],
+  ["TELEGRAM_BOT_TOKEN", process.env.TELEGRAM_BOT_TOKEN],
 ]);
-const deepclawToken = firstNonEmpty([
-  process.env.TELEGRAM_DEEPCLAW_TOKEN,
-  process.env.DEEPCLAW_TOKEN,
+const deepclawToken = firstValidTelegramToken([
+  ["TELEGRAM_DEEPCLAW_TOKEN", process.env.TELEGRAM_DEEPCLAW_TOKEN],
 ]);
 
 const readConfig = () => {
@@ -237,14 +245,14 @@ const readBackupToken = (accountId) => {
     const raw = fs.readFileSync(backupPath, "utf8");
     const backup = raw.trim() ? JSON.parse(raw) : {};
     const telegram = backup?.channels?.telegram ?? {};
-    const accountToken = telegram?.accounts?.[accountId]?.botToken;
-    if (typeof accountToken === "string" && accountToken.trim()) {
-      return accountToken.trim();
+    const accountToken = normalizeTelegramToken(telegram?.accounts?.[accountId]?.botToken);
+    if (accountToken) {
+      return accountToken;
     }
     if (accountId === "default") {
-      const legacy = telegram?.botToken;
-      if (typeof legacy === "string" && legacy.trim()) {
-        return legacy.trim();
+      const legacy = normalizeTelegramToken(telegram?.botToken);
+      if (legacy) {
+        return legacy;
       }
     }
   } catch {
@@ -304,9 +312,11 @@ const accounts =
     ? cfg.channels.telegram.accounts
     : {};
 
+const tokenLooksValid = (raw) => normalizeTelegramToken(raw).length > 0;
+
 const accountHasToken = (accountId) => {
   const token = accounts?.[accountId]?.botToken;
-  return typeof token === "string" && token.trim().length > 0;
+  return tokenLooksValid(token);
 };
 
 for (const accountId of Object.keys(accounts)) {
@@ -314,10 +324,18 @@ for (const accountId of Object.keys(accounts)) {
   if (!entry || typeof entry !== "object") continue;
   if ("agentId" in entry) delete entry.agentId;
   if ("model" in entry) delete entry.model;
+  if ("botToken" in entry && !tokenLooksValid(entry.botToken)) {
+    delete entry.botToken;
+    console.log(`[startup] removed invalid telegram bot token from account "${accountId}"`);
+  }
 }
 
-const legacyBotToken =
-  typeof cfg.channels.telegram.botToken === "string" ? cfg.channels.telegram.botToken.trim() : "";
+const legacyRawToken =
+  typeof cfg.channels.telegram.botToken === "string" ? cfg.channels.telegram.botToken : "";
+const legacyBotToken = normalizeTelegramToken(legacyRawToken);
+if (legacyRawToken.trim() && !legacyBotToken) {
+  console.log("[startup] ignoring channels.telegram.botToken: invalid telegram bot token format");
+}
 if (legacyBotToken && !accountHasToken("default")) {
   const current = accounts.default && typeof accounts.default === "object" ? accounts.default : {};
   accounts.default = { ...current, enabled: true, botToken: legacyBotToken };
@@ -340,12 +358,12 @@ const resolvedOpenclawToken =
 const resolvedDeepclawToken =
   deepclawToken || (accountHasToken("deepseek") ? "" : readBackupToken("deepseek"));
 
-console.log(
-  `[startup] telegram tokens openclaw=${resolvedOpenclawToken ? "present" : "missing"} deepclaw=${resolvedDeepclawToken ? "present" : "missing"}`,
-);
-
 upsertAccount("default", resolvedOpenclawToken);
 upsertAccount("deepseek", resolvedDeepclawToken);
+
+console.log(
+  `[startup] telegram tokens openclaw=${accountHasToken("default") ? "present" : "missing"} deepclaw=${accountHasToken("deepseek") ? "present" : "missing"}`,
+);
 
 cfg.channels.telegram.accounts = accounts;
 
