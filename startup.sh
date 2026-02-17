@@ -284,16 +284,51 @@ if (!cfg.agents.defaults.workspace) {
   cfg.agents.defaults.workspace = "/data/.openclaw/workspace";
 }
 
-if (
-  !cfg.agents.defaults.model ||
-  typeof cfg.agents.defaults.model !== "object" ||
-  !cfg.agents.defaults.model.primary
-) {
-  cfg.agents.defaults.model = {
-    primary: "anthropic/claude-opus-4-6",
-    fallbacks: ["deepseek/deepseek-chat"],
-  };
+const DEFAULT_PRIMARY_MODEL = "anthropic/claude-opus-4-6";
+const DEFAULT_FALLBACK_MODEL = "deepseek/deepseek-chat";
+
+const normalizeModelRef = (raw) => String(raw || "").trim();
+const normalizeUniqueModelRefs = (values) => {
+  const out = [];
+  const seen = new Set();
+  for (const raw of values) {
+    const value = normalizeModelRef(raw);
+    if (!value) continue;
+    const key = value.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(value);
+  }
+  return out;
+};
+
+const rawDefaultsModel = cfg.agents.defaults.model;
+const configuredPrimary =
+  typeof rawDefaultsModel === "string"
+    ? normalizeModelRef(rawDefaultsModel)
+    : normalizeModelRef(rawDefaultsModel?.primary);
+const configuredFallbacks =
+  rawDefaultsModel && typeof rawDefaultsModel === "object" && !Array.isArray(rawDefaultsModel)
+    ? normalizeUniqueModelRefs(
+        Array.isArray(rawDefaultsModel.fallbacks) ? rawDefaultsModel.fallbacks : [],
+      )
+    : [];
+
+const normalizedPrimary = configuredPrimary || DEFAULT_PRIMARY_MODEL;
+const primaryKey = normalizedPrimary.toLowerCase();
+const defaultFallbackKey = DEFAULT_FALLBACK_MODEL.toLowerCase();
+
+let normalizedFallbacks = configuredFallbacks.filter((ref) => ref.toLowerCase() !== primaryKey);
+const hasDefaultFallback = normalizedFallbacks.some((ref) => ref.toLowerCase() === defaultFallbackKey);
+if (primaryKey !== defaultFallbackKey && !hasDefaultFallback) {
+  normalizedFallbacks.push(DEFAULT_FALLBACK_MODEL);
+  console.log(`[startup] ensured model fallback ${DEFAULT_FALLBACK_MODEL}`);
 }
+
+cfg.agents.defaults.model = {
+  primary: normalizedPrimary,
+  fallbacks: normalizedFallbacks,
+};
 
 if (!Array.isArray(cfg.agents.list) || cfg.agents.list.length === 0) {
   cfg.agents.list = [{ id: "main", default: true, workspace: "/data/.openclaw/workspace" }];
