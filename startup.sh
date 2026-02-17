@@ -211,6 +211,28 @@ if (!cfg || typeof cfg !== "object") {
   process.exit(0);
 }
 
+const readBackupToken = (accountId) => {
+  const backupPath = `${configPath}.bak`;
+  try {
+    const raw = fs.readFileSync(backupPath, "utf8");
+    const backup = raw.trim() ? JSON.parse(raw) : {};
+    const telegram = backup?.channels?.telegram ?? {};
+    const accountToken = telegram?.accounts?.[accountId]?.botToken;
+    if (typeof accountToken === "string" && accountToken.trim()) {
+      return accountToken.trim();
+    }
+    if (accountId === "default") {
+      const legacy = telegram?.botToken;
+      if (typeof legacy === "string" && legacy.trim()) {
+        return legacy.trim();
+      }
+    }
+  } catch {
+    // ignore missing/invalid backup
+  }
+  return "";
+};
+
 cfg.gateway = cfg.gateway && typeof cfg.gateway === "object" ? cfg.gateway : {};
 cfg.gateway.mode = "local";
 if (!cfg.gateway.bind) cfg.gateway.bind = "lan";
@@ -262,30 +284,42 @@ const accounts =
     ? cfg.channels.telegram.accounts
     : {};
 
+for (const accountId of Object.keys(accounts)) {
+  const entry = accounts[accountId];
+  if (!entry || typeof entry !== "object") continue;
+  if ("agentId" in entry) delete entry.agentId;
+  if ("model" in entry) delete entry.model;
+}
+
 const legacyBotToken =
   typeof cfg.channels.telegram.botToken === "string" ? cfg.channels.telegram.botToken.trim() : "";
 if (!accounts.default && legacyBotToken) {
   accounts.default = { enabled: true, botToken: legacyBotToken };
 }
 
-const upsertAccount = (accountId, token, defaults) => {
+const upsertAccount = (accountId, token) => {
   const current = accounts[accountId] && typeof accounts[accountId] === "object" ? accounts[accountId] : {};
+  const next = { ...current };
+  if ("agentId" in next) delete next.agentId;
+  if ("model" in next) delete next.model;
   accounts[accountId] = {
-    ...defaults,
-    ...current,
+    ...next,
     ...(token ? { botToken: token } : {}),
     enabled: true,
   };
 };
 
-upsertAccount("default", openclawToken, {
-  agentId: "main",
-  model: "anthropic/claude-opus-4-6",
-});
-upsertAccount("deepseek", deepclawToken, {
-  agentId: "main",
-  model: "deepseek/deepseek-chat",
-});
+const resolvedOpenclawToken =
+  openclawToken || (accounts.default ? "" : readBackupToken("default"));
+const resolvedDeepclawToken =
+  deepclawToken || (accounts.deepseek ? "" : readBackupToken("deepseek"));
+
+console.log(
+  `[startup] telegram tokens openclaw=${resolvedOpenclawToken ? "present" : "missing"} deepclaw=${resolvedDeepclawToken ? "present" : "missing"}`,
+);
+
+upsertAccount("default", resolvedOpenclawToken);
+upsertAccount("deepseek", resolvedDeepclawToken);
 
 cfg.channels.telegram.accounts = accounts;
 
