@@ -18,6 +18,33 @@ const SessionResetConfigSchema = z
   })
   .strict();
 
+const normalizeDmScope = (raw: unknown): unknown => {
+  if (typeof raw !== "string") return raw;
+  const value = raw.trim().toLowerCase();
+  switch (value) {
+    case "global":
+      return "main";
+    case "per-sender":
+      return "per-peer";
+    case "per-channel-sender":
+      return "per-channel-peer";
+    case "per-account-channel-sender":
+      return "per-account-channel-peer";
+    default:
+      return value;
+  }
+};
+
+const DmScopeSchema = z.preprocess(
+  normalizeDmScope,
+  z.union([
+    z.literal("main"),
+    z.literal("per-peer"),
+    z.literal("per-channel-peer"),
+    z.literal("per-account-channel-peer"),
+  ]),
+);
+
 export const SessionSendPolicySchema = z
   .object({
     default: z.union([z.literal("allow"), z.literal("deny")]).optional(),
@@ -52,14 +79,7 @@ export const SessionSendPolicySchema = z
 export const SessionSchema = z
   .object({
     scope: z.union([z.literal("per-sender"), z.literal("global")]).optional(),
-    dmScope: z
-      .union([
-        z.literal("main"),
-        z.literal("per-peer"),
-        z.literal("per-channel-peer"),
-        z.literal("per-account-channel-peer"),
-      ])
-      .optional(),
+    dmScope: DmScopeSchema.optional(),
     identityLinks: z.record(z.string(), z.array(z.string())).optional(),
     resetTriggers: z.array(z.string()).optional(),
     idleMinutes: z.number().int().positive().optional(),
