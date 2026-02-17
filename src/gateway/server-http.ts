@@ -42,10 +42,12 @@ import {
   resolveHookDeliver,
 } from "./hooks.js";
 import { sendUnauthorized } from "./http-common.js";
+import { evaluateGatewayLivenessFromHealth } from "./health-liveness.js";
 import { getBearerToken, getHeader } from "./http-utils.js";
 import { resolveGatewayClientIp } from "./net.js";
 import { handleOpenAiHttpRequest } from "./openai-http.js";
 import { handleOpenResponsesHttpRequest } from "./openresponses-http.js";
+import { getHealthCache, refreshGatewayHealthSnapshot } from "./server/health-state.js";
 import { handleToolsInvokeHttpRequest } from "./tools-invoke-http.js";
 
 type SubsystemLogger = ReturnType<typeof createSubsystemLogger>;
@@ -72,6 +74,91 @@ function sendJson(res: ServerResponse, status: number, body: unknown) {
   res.statusCode = status;
   res.setHeader("Content-Type", "application/json; charset=utf-8");
   res.end(JSON.stringify(body));
+}
+
+const HEALTH_PATHS = new Set(["/health", "/healthz"]);
+const REDACTED_MARKER = "[REDACTED";
+
+const asRecord = (value: unknown): Record<string, unknown> | null =>
+  value && typeof value === "object" ? (value as Record<string, unknown>) : null;
+
+const normalizeApiKey = (raw: unknown) =>
+  String(raw ?? "")
+    .replace(/\r?\n/g, "")
+    .trim();
+
+function isHealthPath(pathname: string): boolean {
+  return HEALTH_PATHS.has(pathname);
+}
+
+function hasModelProviderApiKey(
+  configSnapshot: ReturnType<typeof loadConfig>,
+  provider: "anthropic" | "deepseek",
+): boolean {
+  const envName = provider === "anthropic" ? "ANTHROPIC_API_KEY" : "DEEPSEEK_API_KEY";
+  const envKey = normalizeApiKey(process.env[envName]);
+  if (envKey && !envKey.includes(REDACTED_MARKER)) {
+    return true;
+  }
+
+  const models = asRecord((configSnapshot as Record<string, unknown>).models);
+  const providers = asRecord(models?.providers);
+  const providerConfig = asRecord(providers?.[provider]);
+  const configKey = normalizeApiKey(providerConfig?.apiKey);
+  return Boolean(configKey && !configKey.includes(REDACTED_MARKER));
+}
+
+function scheduleHealthRefreshProbe() {
+  void refreshGatewayHealthSnapshot({ probe: true }).catch(() => {
+    // Keep health route fast; maintenance loop will continue retrying.
+  });
+}
+
+function handleGatewayHealthHttpRequest(params: {
+  res: ServerResponse;
+  configSnapshot: ReturnType<typeof loadConfig>;
+}) {
+  const { res, configSnapshot } = params;
+  const snapshot = getHealthCache();
+  if (!snapshot) {
+    scheduleHealthRefreshProbe();
+  }
+
+  const liveness = evaluateGatewayLivenessFromHealth(snapshot);
+  if (liveness.stale) {
+    scheduleHealthRefreshProbe();
+  }
+
+  const anthropicApiKeyPresent = hasModelProviderApiKey(configSnapshot, "anthropic");
+  const deepseekApiKeyPresent = hasModelProviderApiKey(configSnapshot, "deepseek");
+  const reasons = [...liveness.reasons];
+  if (
+    liveness.requiredTelegramAccounts.some((id) => id.toLowerCase() === "deepseek") &&
+    !deepseekApiKeyPresent
+  ) {
+    reasons.push("deepseek api key missing");
+  }
+
+  const ok = reasons.length === 0;
+  const payload = {
+    ok,
+    source: "gateway-liveness-v1",
+    ts: Date.now(),
+    checkedAt: liveness.checkedAtMs ? new Date(liveness.checkedAtMs).toISOString() : null,
+    ageMs: liveness.ageMs,
+    stale: liveness.stale,
+    staleAfterMs: liveness.staleAfterMs,
+    requiredTelegramAccounts: liveness.requiredTelegramAccounts,
+    modelKeys: {
+      anthropic: anthropicApiKeyPresent,
+      deepseek: deepseekApiKeyPresent,
+    },
+    telegram: liveness.telegram,
+    reasons,
+  };
+
+  res.setHeader("Cache-Control", "no-store");
+  sendJson(res, ok ? 200 : 503, payload);
 }
 
 function isCanvasPath(pathname: string): boolean {
@@ -332,6 +419,11 @@ export function createGatewayHttpServer(opts: {
 
     try {
       const configSnapshot = loadConfig();
+      const url = new URL(req.url ?? "/", "http://localhost");
+      if (isHealthPath(url.pathname)) {
+        handleGatewayHealthHttpRequest({ res, configSnapshot });
+        return;
+      }
       const trustedProxies = configSnapshot.gateway?.trustedProxies ?? [];
       if (await handleHooksRequest(req, res)) {
         return;
@@ -372,7 +464,6 @@ export function createGatewayHttpServer(opts: {
         }
       }
       if (canvasHost) {
-        const url = new URL(req.url ?? "/", "http://localhost");
         if (isCanvasPath(url.pathname)) {
           const ok = await authorizeCanvasRequest({
             req,

@@ -8,6 +8,7 @@ import {
   HEALTH_REFRESH_INTERVAL_MS,
   TICK_INTERVAL_MS,
 } from "./server-constants.js";
+import { evaluateGatewayLivenessFromHealth } from "./health-liveness.js";
 import { formatError } from "./server-utils.js";
 import { setBroadcastHealthUpdate } from "./server/health-state.js";
 
@@ -59,17 +60,50 @@ export function startGatewayMaintenanceTimers(params: {
     params.nodeSendToAllSubscribed("tick", payload);
   }, TICK_INTERVAL_MS);
 
-  // periodic health refresh to keep cached snapshot warm
-  const healthInterval = setInterval(() => {
+  let lastCanaryFailure = "";
+  let lastCanaryFailureAt = 0;
+  const CANARY_LOG_DEBOUNCE_MS = 10 * 60_000;
+
+  const trackLivenessCanary = (snapshot: HealthSummary) => {
+    const liveness = evaluateGatewayLivenessFromHealth(snapshot);
+    if (liveness.ok) {
+      lastCanaryFailure = "";
+      lastCanaryFailureAt = 0;
+      return;
+    }
+
+    const signature = liveness.reasons.join(" | ");
+    const now = Date.now();
+    if (
+      signature === lastCanaryFailure &&
+      now - lastCanaryFailureAt < CANARY_LOG_DEBOUNCE_MS
+    ) {
+      return;
+    }
+    lastCanaryFailure = signature;
+    lastCanaryFailureAt = now;
+    params.logHealth.error(`[liveness] canary failed: ${signature}`);
+  };
+
+  const refreshHealthSnapshot = (context: "initial" | "interval") => {
     void params
       .refreshGatewayHealthSnapshot({ probe: true })
-      .catch((err) => params.logHealth.error(`refresh failed: ${formatError(err)}`));
+      .then((snapshot) => {
+        trackLivenessCanary(snapshot);
+      })
+      .catch((err) => {
+        const label = context === "initial" ? "initial refresh failed" : "refresh failed";
+        params.logHealth.error(`${label}: ${formatError(err)}`);
+      });
+  };
+
+  // periodic health refresh to keep cached snapshot warm
+  const healthInterval = setInterval(() => {
+    refreshHealthSnapshot("interval");
   }, HEALTH_REFRESH_INTERVAL_MS);
 
   // Prime cache so first client gets a snapshot without waiting.
-  void params
-    .refreshGatewayHealthSnapshot({ probe: true })
-    .catch((err) => params.logHealth.error(`initial refresh failed: ${formatError(err)}`));
+  refreshHealthSnapshot("initial");
 
   // dedupe cache cleanup
   const dedupeCleanup = setInterval(() => {
