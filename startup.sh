@@ -180,7 +180,7 @@ if [ ! -f "${CONFIG_PATH}" ]; then
       "memory-core": { "enabled": true }
     }
   },
-  "meta": { "lastTouchedVersion": "2026.2.16" }
+  "meta": { "lastTouchedVersion": "2026.2.10" }
 }
 ENDCFG
 fi
@@ -360,7 +360,7 @@ for (const pluginId of ["telegram", "memory-core"]) {
 }
 
 cfg.meta = cfg.meta && typeof cfg.meta === "object" ? cfg.meta : {};
-cfg.meta.lastTouchedVersion = "2026.2.16";
+cfg.meta.lastTouchedVersion = "2026.2.10";
 
 fs.writeFileSync(configPath, `${JSON.stringify(cfg, null, 2)}\n`, "utf8");
 NODE
