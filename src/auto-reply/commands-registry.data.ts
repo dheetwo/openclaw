@@ -572,6 +572,20 @@ function buildChatCommands(): ChatCommandDefinition[] {
         },
       ],
     }),
+    defineChatCommand({
+      key: "newjob",
+      nativeName: "newjob",
+      description: "Submit a new job to GCP convergent-agents.",
+      textAlias: "/newjob",
+      category: "tools",
+    }),
+    defineChatCommand({
+      key: "jobs",
+      nativeName: "jobs",
+      description: "List your submitted jobs.",
+      textAlias: "/jobs",
+      category: "status",
+    }),
     ...listChannelDocks()
       .filter((dock) => dock.capabilities.nativeCommands)
       .map((dock) => defineDockCommand(dock)),
