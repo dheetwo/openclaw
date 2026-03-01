@@ -123,21 +123,28 @@ const handleJobUpdate = async (update) => {
   return false; // Not a job command
 };
 
-// OpenClaw proxy disabled - return info message
+// Proxy request to OpenClaw
 const proxyToOpenClaw = (req, res) => {
-  res.writeHead(200, { 'Content-Type': 'application/json' });
-  res.end(JSON.stringify({
-    service: 'job-bot',
-    status: 'running',
-    message: 'Job submission bot is running. Use /newjob in Telegram or /api/jobs endpoints.',
-    endpoints: {
-      'GET /health': 'Health check',
-      'GET /api/jobs/config': 'Check configuration',
-      'GET /api/jobs/pending': 'List pending jobs (requires auth)',
-      'PATCH /api/jobs/:id/claimed': 'Claim a job (requires auth)',
-      'PATCH /api/jobs/:id/progress': 'Update job progress (requires auth)',
-    },
-  }));
+  const options = {
+    hostname: '127.0.0.1',
+    port: OPENCLAW_PORT,
+    path: req.url,
+    method: req.method,
+    headers: req.headers,
+  };
+
+  const proxyReq = http.request(options, (proxyRes) => {
+    res.writeHead(proxyRes.statusCode, proxyRes.headers);
+    proxyRes.pipe(res);
+  });
+
+  proxyReq.on('error', (err) => {
+    console.error('Proxy error:', err.message);
+    res.writeHead(502);
+    res.end('Bad Gateway');
+  });
+
+  req.pipe(proxyReq);
 };
 
 // HTTP server
@@ -263,10 +270,23 @@ const server = http.createServer(async (req, res) => {
   proxyToOpenClaw(req, res);
 });
 
-// OpenClaw gateway disabled for now - job bot handles job submission only
-// To enable OpenClaw, configure gateway.controlUi.allowedOrigins in openclaw.json
+// Start OpenClaw gateway on internal port (loopback only)
 const startOpenClaw = () => {
-  console.log('OpenClaw gateway disabled - job bot running standalone');
+  console.log('Starting OpenClaw gateway on port', OPENCLAW_PORT);
+  const openclaw = spawn('node', ['openclaw.mjs', 'gateway', '--allow-unconfigured', '--bind', 'loopback', '--port', String(OPENCLAW_PORT)], {
+    cwd: '/app',
+    env: { ...process.env, PORT: String(OPENCLAW_PORT) },
+    stdio: 'inherit',
+  });
+
+  openclaw.on('error', (err) => {
+    console.error('Failed to start OpenClaw:', err);
+  });
+
+  openclaw.on('exit', (code) => {
+    console.error('OpenClaw exited with code:', code);
+    setTimeout(startOpenClaw, 5000);
+  });
 };
 
 // Start
