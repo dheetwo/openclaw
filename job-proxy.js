@@ -275,7 +275,12 @@ const startOpenClaw = () => {
   console.log('Starting OpenClaw gateway on port', OPENCLAW_PORT);
   const openclaw = spawn('node', ['openclaw.mjs', 'gateway', '--allow-unconfigured', '--bind', 'lan', '--port', String(OPENCLAW_PORT)], {
     cwd: '/app',
-    env: { ...process.env, PORT: String(OPENCLAW_PORT) },
+    env: {
+      ...process.env,
+      PORT: String(OPENCLAW_PORT),
+      // Allow Control UI in non-loopback mode
+      OPENCLAW_GATEWAY_CONTROL_UI_DANGEROUSLY_ALLOW_HOST_HEADER_ORIGIN_FALLBACK: 'true',
+    },
     stdio: 'inherit',
   });
 
