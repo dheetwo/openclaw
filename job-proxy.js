@@ -270,17 +270,12 @@ const server = http.createServer(async (req, res) => {
   proxyToOpenClaw(req, res);
 });
 
-// Start OpenClaw gateway on internal port
+// Start OpenClaw gateway on internal port (loopback only)
 const startOpenClaw = () => {
   console.log('Starting OpenClaw gateway on port', OPENCLAW_PORT);
-  const openclaw = spawn('node', ['openclaw.mjs', 'gateway', '--allow-unconfigured', '--bind', 'lan', '--port', String(OPENCLAW_PORT)], {
+  const openclaw = spawn('node', ['openclaw.mjs', 'gateway', '--allow-unconfigured', '--port', String(OPENCLAW_PORT)], {
     cwd: '/app',
-    env: {
-      ...process.env,
-      PORT: String(OPENCLAW_PORT),
-      // Allow Control UI in non-loopback mode
-      OPENCLAW_GATEWAY_CONTROL_UI_DANGEROUSLY_ALLOW_HOST_HEADER_ORIGIN_FALLBACK: 'true',
-    },
+    env: { ...process.env, PORT: String(OPENCLAW_PORT) },
     stdio: 'inherit',
   });
 
