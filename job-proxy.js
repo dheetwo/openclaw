@@ -1,13 +1,16 @@
 /**
- * Job Bot + OpenClaw Proxy
+ * Job Bot + OpenClaw Proxy (ES Module version)
  *
  * Handles job submission API and proxies other requests to OpenClaw gateway.
  */
 
-const http = require('http');
-const fs = require('fs');
-const path = require('path');
-const { spawn } = require('child_process');
+import http from 'node:http';
+import fs from 'node:fs';
+import path from 'node:path';
+import { spawn } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Config
 const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN || process.env.TELEGRAM_OPENCLAW_TOKEN || process.env.TELEGRAM_DEEPCLAW_TOKEN;
@@ -175,9 +178,6 @@ const server = http.createServer(async (req, res) => {
         const update = JSON.parse(body);
         const handled = await handleJobUpdate(update);
         if (!handled) {
-          // Not a job command, proxy to OpenClaw
-          // (OpenClaw might handle other Telegram commands)
-          // For now, just acknowledge
           console.log('Non-job update, ignoring');
         }
       } catch (e) {
@@ -285,7 +285,6 @@ const startOpenClaw = () => {
 
   openclaw.on('exit', (code) => {
     console.error('OpenClaw exited with code:', code);
-    // Restart after a delay
     setTimeout(startOpenClaw, 5000);
   });
 };
