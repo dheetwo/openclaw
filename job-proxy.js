@@ -7,7 +7,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
+import { spawn, execSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -270,6 +270,21 @@ const server = http.createServer(async (req, res) => {
   proxyToOpenClaw(req, res);
 });
 
+// Fix config before starting OpenClaw (removes unknown keys like web.braveApiKey)
+const fixConfig = () => {
+  console.log('Running openclaw doctor --fix to clean up config...');
+  try {
+    execSync('node openclaw.mjs doctor --fix', {
+      cwd: '/app',
+      stdio: 'inherit',
+      timeout: 30000,
+    });
+    console.log('Config cleanup completed');
+  } catch (err) {
+    console.error('Config cleanup failed (continuing anyway):', err.message);
+  }
+};
+
 // Start OpenClaw gateway on internal port (loopback only)
 const startOpenClaw = () => {
   console.log('Starting OpenClaw gateway on port', OPENCLAW_PORT);
@@ -292,6 +307,9 @@ const startOpenClaw = () => {
 // Start
 server.listen(PORT, async () => {
   console.log(`Job proxy running on port ${PORT}`);
+
+  // Fix config before starting OpenClaw (removes unknown keys)
+  fixConfig();
 
   // Start OpenClaw
   startOpenClaw();
