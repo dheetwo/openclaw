@@ -7,7 +7,7 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn, execSync } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -271,18 +271,39 @@ const server = http.createServer(async (req, res) => {
 });
 
 // Fix config before starting OpenClaw (removes unknown keys like web.braveApiKey)
+// Returns a promise that resolves when fix is complete or times out
 const fixConfig = () => {
-  console.log('Running openclaw doctor --fix to clean up config...');
-  try {
-    execSync('node openclaw.mjs doctor --fix', {
+  return new Promise((resolve) => {
+    console.log('Running openclaw doctor --fix to clean up config...');
+
+    const doctor = spawn('node', ['openclaw.mjs', 'doctor', '--fix'], {
       cwd: '/app',
       stdio: 'inherit',
-      timeout: 30000,
     });
-    console.log('Config cleanup completed');
-  } catch (err) {
-    console.error('Config cleanup failed (continuing anyway):', err.message);
-  }
+
+    // Set a generous timeout (60 seconds)
+    const timeout = setTimeout(() => {
+      console.log('Config cleanup timed out (continuing anyway)');
+      doctor.kill();
+      resolve();
+    }, 60000);
+
+    doctor.on('error', (err) => {
+      clearTimeout(timeout);
+      console.error('Config cleanup failed (continuing anyway):', err.message);
+      resolve();
+    });
+
+    doctor.on('exit', (code) => {
+      clearTimeout(timeout);
+      if (code === 0) {
+        console.log('Config cleanup completed successfully');
+      } else {
+        console.log('Config cleanup exited with code:', code, '(continuing anyway)');
+      }
+      resolve();
+    });
+  });
 };
 
 // Start OpenClaw gateway on internal port (loopback only)
@@ -309,7 +330,7 @@ server.listen(PORT, async () => {
   console.log(`Job proxy running on port ${PORT}`);
 
   // Fix config before starting OpenClaw (removes unknown keys)
-  fixConfig();
+  await fixConfig();
 
   // Start OpenClaw
   startOpenClaw();
